@@ -6,12 +6,14 @@ import android.app.NotificationManager
 import android.app.Service
 import android.content.Context
 import android.content.Intent
+import android.content.pm.PackageManager
 import android.media.AudioFormat
 import android.media.AudioRecord
 import android.media.MediaRecorder
 import android.os.IBinder
 import android.util.Log
 import androidx.core.app.NotificationCompat
+import androidx.core.content.ContextCompat
 import com.aicallscreening.common.AudioConfig
 import com.aicallscreening.common.DataLayerPaths
 import com.aicallscreening.wear.BuildConfig
@@ -103,6 +105,11 @@ class AudioCaptureService : Service() {
     }
 
     private suspend fun streamMicrophone(outputStream: OutputStream) {
+        if (!hasRecordAudioPermission()) {
+            _state.update { it.copy(status = "Microphone permission denied", isCapturing = false) }
+            return
+        }
+
         val minBuffer = AudioRecord.getMinBufferSize(
             AudioConfig.SAMPLE_RATE_HZ,
             AudioFormat.CHANNEL_IN_MONO,
@@ -178,6 +185,10 @@ class AudioCaptureService : Service() {
         )
         getSystemService(NotificationManager::class.java).createNotificationChannel(channel)
     }
+
+    private fun hasRecordAudioPermission(): Boolean =
+        ContextCompat.checkSelfPermission(this, android.Manifest.permission.RECORD_AUDIO) ==
+            PackageManager.PERMISSION_GRANTED
 
     companion object {
         private const val TAG = "AudioCaptureService"
