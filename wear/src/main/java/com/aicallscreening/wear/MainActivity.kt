@@ -14,6 +14,9 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.text.style.TextAlign
@@ -39,7 +42,7 @@ class MainActivity : ComponentActivity() {
                 val state by AudioCaptureService.state.collectAsState()
                 WatchMonitorScreen(
                     state = state,
-                    onStart = { startCapture() },
+                    onStart = { useDebugClip -> startCapture(useDebugClip) },
                     onStop = { AudioCaptureService.stop(this) },
                 )
             }
@@ -54,16 +57,17 @@ class MainActivity : ComponentActivity() {
 
     private fun maybeAutoStartCapture(intent: Intent?) {
         if (intent?.getBooleanExtra(CallListenerService.EXTRA_AUTO_START, false) == true) {
-            startCapture()
+            // Auto-start (incoming call) uses the build-time default source.
+            startCapture(useDebugClip = null)
         }
     }
 
-    private fun startCapture() {
-        if (!hasRecordAudioPermission()) {
+    private fun startCapture(useDebugClip: Boolean?) {
+        if (useDebugClip != true && !hasRecordAudioPermission()) {
             requestPermissionsIfNeeded()
             return
         }
-        AudioCaptureService.start(this)
+        AudioCaptureService.start(this, useDebugClip)
     }
 
     private fun requestPermissionsIfNeeded() {
@@ -86,9 +90,10 @@ class MainActivity : ComponentActivity() {
 @Composable
 private fun WatchMonitorScreen(
     state: CaptureState,
-    onStart: () -> Unit,
+    onStart: (useDebugClip: Boolean) -> Unit,
     onStop: () -> Unit,
 ) {
+    var useDebugClip by remember { mutableStateOf(false) }
     Column(
         modifier = Modifier.fillMaxSize(),
         verticalArrangement = Arrangement.spacedBy(8.dp, Alignment.CenterVertically),
@@ -107,11 +112,26 @@ private fun WatchMonitorScreen(
             textAlign = TextAlign.Center,
         )
         Text(
+            text = if (state.usingDebugClip) {
+                "Source: demo clip"
+            } else {
+                "Mic level: ${state.inputLevel}"
+            },
+            textAlign = TextAlign.Center,
+        )
+        Text(
             text = "Bytes sent: ${state.bytesSent}",
             textAlign = TextAlign.Center,
         )
         Button(
-            onClick = onStart,
+            onClick = { useDebugClip = !useDebugClip },
+            modifier = Modifier.fillMaxWidth(0.8f),
+            enabled = !state.isCapturing,
+        ) {
+            Text(if (useDebugClip) "Source: Demo" else "Source: Mic")
+        }
+        Button(
+            onClick = { onStart(useDebugClip) },
             modifier = Modifier.fillMaxWidth(0.8f),
             enabled = !state.isCapturing,
         ) {

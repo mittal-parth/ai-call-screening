@@ -27,7 +27,11 @@ android {
         versionCode = 1
         versionName = "1.0"
 
-        buildConfigField("boolean", "USE_DEBUG_AUDIO_CLIP", "true")
+        // Default capture source: live microphone. Set to "true" only for
+        // CI/mic-less emulators to stream the bundled demo clip instead. The
+        // watch UI can also override this per-session at runtime (see
+        // AudioCaptureService.EXTRA_USE_DEBUG_CLIP).
+        buildConfigField("boolean", "USE_DEBUG_AUDIO_CLIP", "false")
     }
 
     buildFeatures {

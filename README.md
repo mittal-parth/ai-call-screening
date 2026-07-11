@@ -96,9 +96,11 @@ Data Layer works out of the box between a phone emulator and a Wear OS emulator 
 6. On the watch, tap the incoming-call notification to auto-start capture.
 7. Watch the phone UI for live `SCAM_RISK` verdicts. A **high** risk triggers `/scam/alert` on the watch (vibrate + notification) and a phone notification.
 
-### Debug audio clip mode
+### Capture source (live mic vs debug clip)
 
-`:wear` ships with `USE_DEBUG_AUDIO_CLIP=true` in `BuildConfig` so emulators can stream a bundled 16 kHz PCM clip (`res/raw/scam_demo_clip.pcm`) instead of the live mic. Toggle in `wear/build.gradle.kts` for hardware mic capture.
+`:wear` captures the **live microphone by default** (`USE_DEBUG_AUDIO_CLIP=false` in `BuildConfig`). The watch UI also has a **Source: Mic / Demo** button so you can switch to the bundled 16 kHz PCM clip (`res/raw/scam_demo_clip.pcm`) per session without rebuilding — useful on emulators with no working mic. Set `USE_DEBUG_AUDIO_CLIP=true` in `wear/build.gradle.kts` to make the demo clip the default (e.g. for CI).
+
+To test the live mic on a **Wear OS emulator**, enable **Extended Controls → Microphone → "Virtual microphone uses host audio input"**; otherwise `AudioRecord` never initializes and the watch shows `Mic unavailable — enable host audio input`. When capturing, the watch screen shows a live **Mic level** so you can confirm your voice is actually being picked up.
 
 ### Simulate an incoming call (phone emulator)
 
@@ -154,4 +156,5 @@ The script installs APKs, starts monitoring, simulates `adb emu gsm call`, and a
 | No connected watch nodes | Re-pair via Wear OS companion app or use two emulators |
 | Gemini auth error | Regenerate ephemeral `AQ.` token in `local.properties` |
 | No audio bytes on phone | Start watch capture after phone `MonitorService` is running |
-| Emulator mic unavailable | Enable `USE_DEBUG_AUDIO_CLIP` in `:wear` |
+| Watch shows `Mic unavailable` | Enable "Virtual microphone uses host audio input" in the Wear emulator's Extended Controls, or tap **Source: Demo** on the watch |
+| Always the same (IRS/tax) verdict | You are streaming the demo clip — tap **Source: Mic** on the watch, or ensure `USE_DEBUG_AUDIO_CLIP=false` |
