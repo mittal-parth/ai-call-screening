@@ -51,6 +51,7 @@ class AnalyzerRouter(
     private val modelManager = GemmaModelManager(context)
     private val geminiClient = GeminiLiveClient(onHighRisk = ::handleHighRisk)
 
+    private val settings = OfflineFallbackSettings(context)
     private lateinit var selector: EngineSelector
     private val windowBuffer = AudioWindowBuffer()
     private val onDeviceAnalyzer: ScamAudioAnalyzer =
@@ -60,6 +61,12 @@ class AnalyzerRouter(
     private val alertSent = AtomicBoolean(false)
     private val inferenceInFlight = AtomicBoolean(false)
     private var started = false
+
+    /** Whether the offline fallback feature is enabled for this session. */
+    private var fallbackEnabled = false
+
+    /** Testing aid: pin to the on-device engine regardless of connectivity. */
+    private var forceOnDevice = false
 
     private var cloudObserverJob: Job? = null
 
@@ -77,17 +84,28 @@ class AnalyzerRouter(
         if (started) return
         started = true
         alertSent.set(false)
-        val online = isOnlineNow()
-        selector = EngineSelector(startOnline = online)
-        observeCloud()
-        runCatching {
-            connectivityManager?.registerDefaultNetworkCallback(networkCallback)
-        }.onFailure { Log.w(TAG, "Failed to register network callback", it) }
+        val snapshot = settings.snapshot()
+        fallbackEnabled = snapshot.enabled
+        forceOnDevice = snapshot.enabled && snapshot.forceOnDevice
 
-        if (selector.engine == AnalyzerEngine.CLOUD) {
-            activateCloud()
-        } else {
-            activateOnDevice("No internet; using on-device model")
+        val online = isOnlineNow()
+        // When the feature is off, always report as online so the selector stays
+        // on cloud and no on-device transitions ever happen.
+        selector = EngineSelector(startOnline = if (fallbackEnabled) online else true)
+        observeCloud()
+        if (fallbackEnabled) {
+            runCatching {
+                connectivityManager?.registerDefaultNetworkCallback(networkCallback)
+            }.onFailure { Log.w(TAG, "Failed to register network callback", it) }
+        }
+
+        when {
+            forceOnDevice -> {
+                selector.onCloudError() // move selector to ON_DEVICE
+                activateOnDevice("Forced on-device (testing)")
+            }
+            selector.engine == AnalyzerEngine.CLOUD -> activateCloud()
+            else -> activateOnDevice("No internet; using on-device model")
         }
     }
 
@@ -153,7 +171,7 @@ class AnalyzerRouter(
                         alertTriggered = cloudState.alertTriggered || it.alertTriggered,
                     )
                 }
-                if (isCloudFailure(cloudState.status)) {
+                if (fallbackEnabled && isCloudFailure(cloudState.status)) {
                     Log.w(TAG, "Cloud engine failed (${cloudState.status}); falling back on-device")
                     selector.onCloudError()
                     activateOnDevice("Cloud unavailable; using on-device model")
@@ -163,7 +181,7 @@ class AnalyzerRouter(
     }
 
     private suspend fun onConnectivity(online: Boolean) {
-        if (!started) return
+        if (!started || !fallbackEnabled || forceOnDevice) return
         val previous = currentEngine()
         val next = selector.onConnectivityChanged(online)
         if (next == previous) return

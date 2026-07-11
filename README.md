@@ -31,7 +31,9 @@ flowchart LR
 
 ## Offline on-device fallback (Gemma 4 E2B)
 
-When the network is unavailable or the Gemini Live connection fails, `AnalyzerRouter` switches to an on-device engine:
+The feature is **behind a runtime flag and disabled by default** — until you turn it on, the app behaves exactly like the cloud-only path (no on-device analysis, no auto-switching).
+
+When enabled (and the network is unavailable or the Gemini Live connection fails), `AnalyzerRouter` switches to an on-device engine:
 
 - **Model:** `litert-community/gemma-4-E2B-it-litert-lm` (`.litertlm`, ~2.58 GB, Apache-2.0, multimodal with native audio).
 - **Runtime:** `com.google.ai.edge.litertlm:litertlm-android` (requires **Kotlin 2.3.0+**), NPU/GPU/CPU with automatic fallback.
@@ -46,6 +48,21 @@ When the network is unavailable or the Gemini Live connection fails, `AnalyzerRo
 - **Device requirements:** physical device (not emulator), ~8 GB RAM, GPU/NPU strongly preferred. Low-RAM devices should stay cloud-only.
 - **Trade-offs vs cloud:** higher latency (windowed request/response, not continuous streaming) and more battery use; accuracy depends on the smaller on-device model.
 - **Emulator/CI:** set `USE_MOCK_INFERENCE=true` in `local.properties` to use a stub analyzer instead of the real (device-only) runtime and multi-GB model.
+
+### Enabling and toggling the feature
+
+The feature is controlled at runtime via two switches on the phone screen (persisted across launches, applied the next time you start monitoring):
+
+- **Enable offline fallback (beta)** — master flag. Off by default. When off, nothing changes vs. the cloud-only behavior.
+- **Force on-device engine (testing)** — pins analysis to the on-device engine regardless of connectivity, so you can exercise the offline path without actually going offline.
+
+**Testing in an emulator** (emulators can't run the real Gemma model):
+
+1. Build with `USE_MOCK_INFERENCE=true` in `local.properties` (uses the stub analyzer).
+2. Launch the app and turn on **Enable offline fallback**, then **Force on-device engine**.
+3. Tap **Start monitoring** — the "Engine" line shows **On-device (offline)** and the mock analyzer runs, no network changes needed.
+
+To test the real auto-switch on a physical device: enable only **Enable offline fallback** (leave force off), download the model, start monitoring, then toggle airplane mode to watch it fall back and recover.
 
 ## Prerequisites
 
