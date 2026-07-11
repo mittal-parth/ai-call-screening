@@ -26,6 +26,12 @@ android {
 
         val geminiApiKey = localProperties.getProperty("GEMINI_API_KEY", "")
         buildConfigField("String", "GEMINI_API_KEY", "\"$geminiApiKey\"")
+
+        // When true, the offline path uses a stub analyzer instead of the real
+        // LiteRT-LM/Gemma runtime (which needs a physical device + ~2.6 GB model).
+        // Useful for emulator/CI builds. Override in local.properties.
+        val useMockInference = localProperties.getProperty("USE_MOCK_INFERENCE", "false")
+        buildConfigField("boolean", "USE_MOCK_INFERENCE", useMockInference)
     }
 
     buildFeatures {
@@ -38,14 +44,20 @@ android {
         targetCompatibility = JavaVersion.VERSION_17
     }
 
-    kotlinOptions {
-        jvmTarget = "17"
-    }
-
     packaging {
         resources {
             excludes += "/META-INF/{AL2.0,LGPL2.1}"
         }
+        jniLibs {
+            // LiteRT-LM ships multiple native libs; keep the first of any dupes.
+            pickFirsts += "**/*.so"
+        }
+    }
+}
+
+kotlin {
+    compilerOptions {
+        jvmTarget = org.jetbrains.kotlin.gradle.dsl.JvmTarget.JVM_17
     }
 }
 
@@ -61,6 +73,7 @@ dependencies {
     implementation(libs.androidx.compose.material3)
     implementation(libs.play.services.wearable)
     implementation(libs.okhttp)
+    implementation(libs.litert.lm.android)
     implementation(libs.kotlinx.coroutines.android)
     implementation(libs.kotlinx.coroutines.play.services)
 

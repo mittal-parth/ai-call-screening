@@ -10,11 +10,12 @@ import android.content.Intent
 import android.os.IBinder
 import android.util.Log
 import androidx.core.app.NotificationCompat
+import com.aicallscreening.common.AnalyzerEngine
 import com.aicallscreening.common.DataLayerPaths
 import com.aicallscreening.common.ScamVerdict
 import com.aicallscreening.mobile.MainActivity
 import com.aicallscreening.mobile.R
-import com.aicallscreening.mobile.gemini.GeminiLiveClient
+import com.aicallscreening.mobile.analysis.AnalyzerRouter
 import com.google.android.gms.wearable.ChannelClient
 import com.google.android.gms.wearable.Wearable
 import kotlinx.coroutines.CoroutineScope
@@ -39,6 +40,8 @@ data class MonitorState(
     val latestVerdict: String? = null,
     val latestReason: String? = null,
     val alertSent: Boolean = false,
+    val engine: String = "cloud",
+    val modelStatus: String? = null,
 )
 
 class MonitorService : Service() {
@@ -46,10 +49,16 @@ class MonitorService : Service() {
     private val channelClient by lazy { Wearable.getChannelClient(this) }
     private val messageClient by lazy { Wearable.getMessageClient(this) }
     private val nodeClient by lazy { Wearable.getNodeClient(this) }
-    private val geminiClient = GeminiLiveClient(onHighRisk = ::handleHighRiskAlert)
+    private val analyzerRouter by lazy {
+        AnalyzerRouter(
+            context = applicationContext,
+            scope = serviceScope,
+            onHighRisk = ::handleHighRiskAlert,
+        )
+    }
     private val bytesReceived = AtomicLong(0)
     private var observeJob: Job? = null
-    private var geminiConnected = false
+    private var routerStarted = false
     private val audioChannelJob = AtomicReference<Job?>(null)
     private val channelCallback = object : ChannelClient.ChannelCallback() {
         override fun onChannelOpened(channel: ChannelClient.Channel) {
@@ -80,13 +89,15 @@ class MonitorService : Service() {
         channelClient.registerChannelCallback(channelCallback)
         createNotificationChannels()
         observeJob = serviceScope.launch {
-            geminiClient.state.collect { geminiState ->
+            analyzerRouter.state.collect { routerState ->
                 _state.update {
                     it.copy(
-                        connectionStatus = geminiState.status,
-                        latestVerdict = geminiState.latestVerdict?.risk?.name?.lowercase(),
-                        latestReason = geminiState.latestVerdict?.reason ?: geminiState.transcript,
-                        alertSent = geminiState.alertTriggered || it.alertSent,
+                        connectionStatus = routerState.status,
+                        latestVerdict = routerState.latestVerdict?.risk?.name?.lowercase(),
+                        latestReason = routerState.latestVerdict?.reason ?: routerState.transcript,
+                        alertSent = routerState.alertTriggered || it.alertSent,
+                        engine = if (routerState.engine == AnalyzerEngine.ON_DEVICE) "on-device" else "cloud",
+                        modelStatus = routerState.modelStatus,
                     )
                 }
             }
@@ -95,10 +106,14 @@ class MonitorService : Service() {
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         startForeground(NOTIFICATION_ID_MONITOR, buildMonitorNotification())
+        if (intent?.action == ACTION_DOWNLOAD_MODEL) {
+            analyzerRouter.downloadModel()
+            return START_NOT_STICKY
+        }
         _state.update { it.copy(isMonitoring = true, connectionStatus = "Waiting for audio") }
-        if (!geminiConnected) {
-            geminiConnected = true
-            geminiClient.connect()
+        if (!routerStarted) {
+            routerStarted = true
+            analyzerRouter.start()
         }
         return START_STICKY
     }
@@ -107,8 +122,8 @@ class MonitorService : Service() {
         channelClient.unregisterChannelCallback(channelCallback)
         audioChannelJob.getAndSet(null)?.cancel()
         observeJob?.cancel()
-        geminiClient.disconnect()
-        geminiConnected = false
+        analyzerRouter.stop()
+        routerStarted = false
         serviceScope.cancel()
         _state.value = MonitorState()
         super.onDestroy()
@@ -131,7 +146,7 @@ class MonitorService : Service() {
                 val chunk = if (read == buffer.size) buffer else buffer.copyOf(read)
                 bytesReceived.addAndGet(read.toLong())
                 _state.update { it.copy(bytesReceived = bytesReceived.get()) }
-                geminiClient.sendAudioChunk(chunk)
+                analyzerRouter.onAudioChunk(chunk)
             }
         } catch (error: Exception) {
             Log.e(TAG, "Audio channel read failed", error)
@@ -212,6 +227,7 @@ class MonitorService : Service() {
         private const val CHANNEL_ALERT = "scam_alert"
         private const val NOTIFICATION_ID_MONITOR = 1001
         private const val NOTIFICATION_ID_ALERT = 1002
+        private const val ACTION_DOWNLOAD_MODEL = "com.aicallscreening.mobile.action.DOWNLOAD_MODEL"
 
         private val _state = MutableStateFlow(MonitorState())
         val state: StateFlow<MonitorState> = _state.asStateFlow()
@@ -223,6 +239,13 @@ class MonitorService : Service() {
 
         fun stop(context: Context) {
             context.stopService(Intent(context, MonitorService::class.java))
+        }
+
+        fun downloadOfflineModel(context: Context) {
+            val intent = Intent(context, MonitorService::class.java).apply {
+                action = ACTION_DOWNLOAD_MODEL
+            }
+            context.startForegroundService(intent)
         }
     }
 }

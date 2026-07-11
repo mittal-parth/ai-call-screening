@@ -2,9 +2,9 @@
 <resources>
     <string name="app_name">Scam Call Detector</string>
     <string name="monitor_channel_name">Call monitoring</string>
-    <string name="monitor_channel_description">Streams watch audio to Gemini for scam detection</string>
+    <string name="monitor_channel_description">Analyzes watch audio for scam detection (cloud or on-device)</string>
     <string name="monitor_notification_title">Monitoring call audio</string>
-    <string name="monitor_notification_body">Listening for scam patterns via Gemini Live</string>
+    <string name="monitor_notification_body">Listening for scam patterns (cloud or offline on-device)</string>
     <string name="scam_alert_title">Likely scam call</string>
     <string name="scam_alert_body">Stop interacting and hang up if unsure.</string>
 </resources>
