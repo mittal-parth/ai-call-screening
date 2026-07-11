@@ -45,6 +45,7 @@ class MainActivity : ComponentActivity() {
                         state = state,
                         onStart = { startMonitoring() },
                         onStop = { MonitorService.stop(this) },
+                        onDownloadModel = { MonitorService.downloadOfflineModel(this) },
                     )
                 }
             }
@@ -90,6 +91,7 @@ private fun MonitorScreen(
     state: MonitorState,
     onStart: () -> Unit,
     onStop: () -> Unit,
+    onDownloadModel: () -> Unit,
 ) {
     Column(
         modifier = Modifier
@@ -98,11 +100,13 @@ private fun MonitorScreen(
         verticalArrangement = Arrangement.spacedBy(12.dp),
     ) {
         Text("Scam Call Detector", style = MaterialTheme.typography.headlineMedium)
+        Text("Engine: ${if (state.engine == "on-device") "On-device (offline)" else "Cloud (Gemini Live)"}")
         Text("Connection: ${state.connectionStatus}")
         Text("Monitoring: ${if (state.isMonitoring) "yes" else "no"}")
         Text("Bytes received: ${state.bytesReceived}")
         Text("Live verdict: ${state.latestVerdict ?: "—"}")
         Text("Reason: ${state.latestReason ?: "—"}")
+        state.modelStatus?.let { Text("Offline model: $it") }
         if (state.alertSent) {
             Text("ALERT SENT", color = MaterialTheme.colorScheme.error)
         }
@@ -120,6 +124,12 @@ private fun MonitorScreen(
             enabled = state.isMonitoring,
         ) {
             Text("Stop monitoring")
+        }
+        Button(
+            onClick = onDownloadModel,
+            modifier = Modifier.fillMaxWidth(),
+        ) {
+            Text("Download offline model")
         }
     }
 }
