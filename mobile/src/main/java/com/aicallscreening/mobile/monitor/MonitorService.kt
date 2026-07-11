@@ -38,6 +38,7 @@ data class MonitorState(
     val bytesReceived: Long = 0,
     val latestVerdict: String? = null,
     val latestReason: String? = null,
+    val callTranscript: String = "",
     val alertSent: Boolean = false,
 )
 
@@ -86,6 +87,7 @@ class MonitorService : Service() {
                         connectionStatus = geminiState.status,
                         latestVerdict = geminiState.latestVerdict?.risk?.name?.lowercase(),
                         latestReason = geminiState.latestVerdict?.reason ?: geminiState.transcript,
+                        callTranscript = geminiState.callTranscript,
                         alertSent = geminiState.alertTriggered || it.alertSent,
                     )
                 }
@@ -137,6 +139,8 @@ class MonitorService : Service() {
             Log.e(TAG, "Audio channel read failed", error)
         } finally {
             inputStream.close()
+            // Flush any buffered audio so Gemini emits a final verdict for the turn.
+            geminiClient.endAudioStream()
             Log.i(TAG, "Audio channel finished. bytes=${bytesReceived.get()}")
         }
     }
@@ -150,11 +154,19 @@ class MonitorService : Service() {
     }
 
     private suspend fun sendWatchAlert(reason: String) {
-        val nodes = nodeClient.connectedNodes.await()
-        val payload = reason.toByteArray()
-        for (node in nodes) {
-            messageClient.sendMessage(node.id, DataLayerPaths.ALERT, payload).await()
-            Log.i(TAG, "Sent ${DataLayerPaths.ALERT} to ${node.displayName}")
+        try {
+            val nodes = nodeClient.connectedNodes.await()
+            if (nodes.isEmpty()) {
+                Log.w(TAG, "No connected watch nodes for ${DataLayerPaths.ALERT} message")
+                return
+            }
+            val payload = reason.toByteArray()
+            for (node in nodes) {
+                messageClient.sendMessage(node.id, DataLayerPaths.ALERT, payload).await()
+                Log.i(TAG, "Sent ${DataLayerPaths.ALERT} to ${node.displayName}")
+            }
+        } catch (e: Exception) {
+            Log.w(TAG, "Failed to send ${DataLayerPaths.ALERT} to watch nodes", e)
         }
     }
 

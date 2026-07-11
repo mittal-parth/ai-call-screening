@@ -148,6 +148,7 @@ class AudioCaptureService : Service() {
 
     private suspend fun streamDebugClip(outputStream: OutputStream) {
         val buffer = ByteArray(AudioConfig.CHUNK_SIZE_BYTES)
+        var chunks = 0L
         try {
             while (captureJob?.isActive == true) {
                 resources.openRawResource(R.raw.scam_demo_clip).use { inputStream ->
@@ -158,6 +159,10 @@ class AudioCaptureService : Service() {
                         outputStream.flush()
                         bytesSent.addAndGet(read.toLong())
                         _state.update { it.copy(bytesSent = bytesSent.get()) }
+                        chunks++
+                        if (chunks % 30L == 1L) {
+                            Log.i(TAG, "→ phone audio (debug clip): chunk #$chunks, ${bytesSent.get()} B total")
+                        }
                         kotlinx.coroutines.delay(AudioConfig.CHUNK_DURATION_MS.toLong())
                         read = inputStream.read(buffer)
                     }
