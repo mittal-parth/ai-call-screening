@@ -202,16 +202,47 @@ class GeminiTestActivity : ComponentActivity() {
         }
         val buffer = ByteArray(AudioConfig.CHUNK_SIZE_BYTES)
         recorder.startRecording()
+        var micChunks = 0L
+        var maxPeak = 0
         try {
             while (currentCoroutineContext().isActive) {
                 val read = recorder.read(buffer, 0, buffer.size)
                 if (read <= 0) break
+                val peak = peakAmplitude(buffer, read)
+                if (peak > maxPeak) maxPeak = peak
+                micChunks++
+                // Surface the actual signal level so a dead mic (all silence) is
+                // obvious on screen, independent of whether bytes are being sent.
+                if (micChunks % 15L == 1L) {
+                    val pct = peak * 100 / Short.MAX_VALUE
+                    val diag = if (maxPeak < SILENCE_THRESHOLD) {
+                        "SILENT — no sound reaching the mic (emulator host-audio off, or muted)"
+                    } else {
+                        "capturing audio ✓"
+                    }
+                    appendLog("🎙️ mic level: peak=$peak/${Short.MAX_VALUE} (${pct}%) — $diag")
+                }
                 client.sendAudioChunk(if (read == buffer.size) buffer else buffer.copyOf(read))
             }
         } finally {
             recorder.stop()
             recorder.release()
+            appendLog("🎙️ mic stopped. Loudest sample this session: $maxPeak/${Short.MAX_VALUE}" +
+                if (maxPeak < SILENCE_THRESHOLD) " → the mic never heard anything." else "")
         }
+    }
+
+    /** Loudest 16-bit sample magnitude in the little-endian PCM buffer. */
+    private fun peakAmplitude(buffer: ByteArray, length: Int): Int {
+        var peak = 0
+        var i = 0
+        while (i + 1 < length) {
+            val sample = ((buffer[i].toInt() and 0xFF) or (buffer[i + 1].toInt() shl 8)).toShort()
+            val amp = kotlin.math.abs(sample.toInt())
+            if (amp > peak) peak = amp
+            i += 2
+        }
+        return peak
     }
 
     private fun stopTest() {
@@ -227,6 +258,11 @@ class GeminiTestActivity : ComponentActivity() {
         client.disconnect()
         scope.cancel()
         super.onDestroy()
+    }
+
+    private companion object {
+        // 16-bit peak below this (~1% of full scale) counts as effective silence.
+        const val SILENCE_THRESHOLD = 300
     }
 }
 
