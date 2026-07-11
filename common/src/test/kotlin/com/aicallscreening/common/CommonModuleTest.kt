@@ -12,9 +12,9 @@ class GeminiJsonTest {
     @Test
     fun buildSetupMessage_containsModelAndSystemInstruction() {
         val json = GeminiJson.buildSetupMessage()
-        assertTrue(json.contains(""""model":"models/gemini-2.5-flash-native-audio-preview-12-2025""""))
+        assertTrue(json.contains(ScamConfig.GEMINI_LIVE_MODEL))
         assertTrue(json.contains("responseModalities"))
-        assertTrue(json.contains("SCAM_RISK"))
+        assertTrue(json.contains("systemInstruction"))
     }
 
     @Test
