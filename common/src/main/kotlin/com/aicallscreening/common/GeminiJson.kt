@@ -1,17 +1,9 @@
 package com.aicallscreening.common
 
 object GeminiJson {
-    private const val SYSTEM_INSTRUCTION = """
-You are a real-time phone scam call monitor. Listen to the caller audio and assess scam risk.
-After each conversational turn, emit exactly one compact verdict line in this format:
-SCAM_RISK: <low|medium|high> | <brief reason>
-Flag high risk for urgency, gift cards, wire transfers, OTP requests, impersonation, or threats.
-Keep reasons under 120 characters.
-"""
-
     fun buildSetupMessage(
         model: String = ScamConfig.GEMINI_LIVE_MODEL,
-        systemInstruction: String = SYSTEM_INSTRUCTION.trim(),
+        systemInstruction: String = ScamPrompt.SYSTEM_INSTRUCTION,
     ): String {
         val escapedInstruction = escapeJson(systemInstruction)
         return """
