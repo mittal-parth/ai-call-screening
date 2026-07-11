@@ -18,6 +18,7 @@ import okhttp3.WebSocketListener
 import okio.ByteString
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicBoolean
+import java.util.concurrent.atomic.AtomicInteger
 
 data class GeminiConnectionState(
     val status: String = "Disconnected",
@@ -42,6 +43,10 @@ class GeminiLiveClient(
     }
 
     private var webSocket: WebSocket? = null
+    // Bumped on every connect(). A superseded socket's late onClosed/onFailure
+    // callbacks carry a stale epoch and must not mutate the current connection's
+    // state — otherwise a reconnect's old "closed" flips status to Disconnected.
+    private val connectionEpoch = AtomicInteger(0)
     private val setupComplete = AtomicBoolean(false)
     private val alertSent = AtomicBoolean(false)
     private var audioChunksSent = 0L
@@ -75,7 +80,8 @@ class GeminiLiveClient(
             )
             .build()
 
-        webSocket = okHttpClient.newWebSocket(request, Listener())
+        val epoch = connectionEpoch.incrementAndGet()
+        webSocket = okHttpClient.newWebSocket(request, Listener(epoch))
     }
 
     fun sendAudioChunk(pcmBytes: ByteArray) {
@@ -109,14 +115,19 @@ class GeminiLiveClient(
         _state.value = _state.value.copy(status = "Disconnected")
     }
 
-    private inner class Listener : WebSocketListener() {
+    private inner class Listener(private val epoch: Int) : WebSocketListener() {
+        /** True only while this listener belongs to the live connection. */
+        private fun isCurrent(): Boolean = epoch == connectionEpoch.get()
+
         override fun onOpen(webSocket: WebSocket, response: Response) {
+            if (!isCurrent()) return
             emit("WebSocket opened (HTTP ${response.code}) — sending setup")
             _state.value = _state.value.copy(status = "Connected")
             webSocket.send(GeminiJson.buildSetupMessage())
         }
 
         override fun onMessage(webSocket: WebSocket, text: String) {
+            if (!isCurrent()) return
             if (GeminiJson.isSetupComplete(text)) {
                 setupComplete.set(true)
                 _state.value = _state.value.copy(status = "Ready")
@@ -175,11 +186,13 @@ class GeminiLiveClient(
 
         override fun onFailure(webSocket: WebSocket, t: Throwable, response: Response?) {
             Log.e(TAG, "Gemini WebSocket failure", t)
+            if (!isCurrent()) return
             emit("FAILURE: ${t.message}${response?.let { " (HTTP ${it.code})" } ?: ""}")
             _state.value = _state.value.copy(status = "Error: ${t.message}")
         }
 
         override fun onClosed(webSocket: WebSocket, code: Int, reason: String) {
+            if (!isCurrent()) return
             emit("WebSocket closed: $code $reason")
             setupComplete.set(false)
             _state.value = _state.value.copy(status = "Disconnected")
