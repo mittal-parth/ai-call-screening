@@ -47,7 +47,12 @@ class AudioCaptureService : Service() {
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         startForeground(NOTIFICATION_ID, buildNotification())
-        startCapture()
+        // Runtime override wins over the build-time flag so emulator testing can
+        // switch sources without a rebuild. Falls back to BuildConfig otherwise.
+        val useDebugClip = intent?.takeIf { it.hasExtra(EXTRA_USE_DEBUG_CLIP) }
+            ?.getBooleanExtra(EXTRA_USE_DEBUG_CLIP, BuildConfig.USE_DEBUG_AUDIO_CLIP)
+            ?: BuildConfig.USE_DEBUG_AUDIO_CLIP
+        startCapture(useDebugClip)
         return START_STICKY
     }
 
@@ -60,13 +65,14 @@ class AudioCaptureService : Service() {
 
     override fun onBind(intent: Intent?): IBinder? = null
 
-    private fun startCapture() {
+    private fun startCapture(useDebugClip: Boolean) {
         captureJob?.cancel()
         bytesSent.set(0)
         _state.update {
             CaptureState(
                 isCapturing = true,
                 status = "Connecting",
+                usingDebugClip = useDebugClip,
             )
         }
 
@@ -82,9 +88,9 @@ class AudioCaptureService : Service() {
                 val channel = channelClient.openChannel(phoneNodeId, DataLayerPaths.AUDIO).await()
                 val outputStream = channelClient.getOutputStream(channel).await()
                 _state.update { it.copy(status = "Streaming") }
-                Log.i(TAG, "Opened audio channel to $phoneNodeId")
+                Log.i(TAG, "Opened audio channel to $phoneNodeId (debugClip=$useDebugClip)")
 
-                if (BuildConfig.USE_DEBUG_AUDIO_CLIP) {
+                if (useDebugClip) {
                     streamDebugClip(outputStream)
                 } else {
                     streamMicrophone(outputStream)
@@ -107,6 +113,7 @@ class AudioCaptureService : Service() {
     private suspend fun streamMicrophone(outputStream: OutputStream) {
         if (!hasRecordAudioPermission()) {
             _state.update { it.copy(status = "Microphone permission denied", isCapturing = false) }
+            outputStream.close()
             return
         }
 
@@ -115,6 +122,13 @@ class AudioCaptureService : Service() {
             AudioFormat.CHANNEL_IN_MONO,
             AudioFormat.ENCODING_PCM_16BIT,
         )
+        if (minBuffer <= 0) {
+            _state.update {
+                it.copy(status = "Mic unavailable (bad audio config)", isCapturing = false)
+            }
+            outputStream.close()
+            return
+        }
         val bufferSize = maxOf(minBuffer, AudioConfig.CHUNK_SIZE_BYTES)
         val recorder = AudioRecord(
             MediaRecorder.AudioSource.MIC,
@@ -124,26 +138,79 @@ class AudioCaptureService : Service() {
             bufferSize,
         )
 
+        // On emulators without host-audio input the recorder never initializes;
+        // surface that instead of silently streaming nothing.
+        if (recorder.state != AudioRecord.STATE_INITIALIZED) {
+            Log.e(TAG, "AudioRecord failed to initialize (state=${recorder.state})")
+            recorder.release()
+            _state.update {
+                it.copy(status = "Mic unavailable — enable host audio input", isCapturing = false)
+            }
+            outputStream.close()
+            return
+        }
+
         val buffer = ByteArray(AudioConfig.CHUNK_SIZE_BYTES)
-        recorder.startRecording()
         try {
+            recorder.startRecording()
+            if (recorder.recordingState != AudioRecord.RECORDSTATE_RECORDING) {
+                Log.e(TAG, "AudioRecord did not start (state=${recorder.recordingState})")
+                _state.update { it.copy(status = "Mic failed to start", isCapturing = false) }
+                return
+            }
+            _state.update { it.copy(status = "Listening") }
             while (captureJob?.isActive == true) {
                 val read = recorder.read(buffer, 0, buffer.size)
-                if (read <= 0) {
+                if (read < 0) {
+                    val message = readErrorMessage(read)
+                    Log.e(TAG, "AudioRecord.read error: $message ($read)")
+                    _state.update { it.copy(status = "Mic error: $message", isCapturing = false) }
                     break
+                }
+                if (read == 0) {
+                    continue
                 }
                 val chunk = if (read == buffer.size) buffer else buffer.copyOf(read)
                 outputStream.write(chunk)
                 outputStream.flush()
                 bytesSent.addAndGet(read.toLong())
-                _state.update { it.copy(bytesSent = bytesSent.get()) }
+                val level = computeInputLevel(buffer, read)
+                _state.update { it.copy(bytesSent = bytesSent.get(), inputLevel = level) }
             }
         } finally {
-            recorder.stop()
+            if (recorder.recordingState == AudioRecord.RECORDSTATE_RECORDING) {
+                recorder.stop()
+            }
             recorder.release()
             outputStream.close()
             Log.i(TAG, "Microphone stream finished. bytes=${bytesSent.get()}")
         }
+    }
+
+    private fun readErrorMessage(code: Int): String = when (code) {
+        AudioRecord.ERROR_INVALID_OPERATION -> "invalid operation"
+        AudioRecord.ERROR_BAD_VALUE -> "bad value"
+        AudioRecord.ERROR_DEAD_OBJECT -> "recorder died"
+        else -> "code $code"
+    }
+
+    /**
+     * Peak amplitude of a PCM16 chunk normalized to 0..100 so the watch UI can
+     * confirm the app is actually hearing input (not just the system mic icon).
+     */
+    private fun computeInputLevel(buffer: ByteArray, bytesRead: Int): Int {
+        var peak = 0
+        var i = 0
+        val end = bytesRead - 1
+        while (i < end) {
+            val sample = (buffer[i].toInt() and 0xFF) or (buffer[i + 1].toInt() shl 8)
+            val magnitude = kotlin.math.abs(sample)
+            if (magnitude > peak) {
+                peak = magnitude
+            }
+            i += 2
+        }
+        return (peak * 100 / Short.MAX_VALUE).coerceIn(0, 100)
     }
 
     private suspend fun streamDebugClip(outputStream: OutputStream) {
@@ -200,11 +267,18 @@ class AudioCaptureService : Service() {
         private const val CHANNEL_CAPTURE = "audio_capture"
         private const val NOTIFICATION_ID = 3001
 
+        /** Optional boolean intent extra to override BuildConfig.USE_DEBUG_AUDIO_CLIP at runtime. */
+        const val EXTRA_USE_DEBUG_CLIP = "extra_use_debug_clip"
+
         private val _state = MutableStateFlow(CaptureState())
         val state: StateFlow<CaptureState> = _state.asStateFlow()
 
-        fun start(context: Context) {
-            val intent = Intent(context, AudioCaptureService::class.java)
+        fun start(context: Context, useDebugClip: Boolean? = null) {
+            val intent = Intent(context, AudioCaptureService::class.java).apply {
+                if (useDebugClip != null) {
+                    putExtra(EXTRA_USE_DEBUG_CLIP, useDebugClip)
+                }
+            }
             context.startForegroundService(intent)
         }
 
