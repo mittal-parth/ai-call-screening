@@ -33,8 +33,8 @@ object ScamConfig {
     /** Practical RAM floor for running Gemma 4 E2B on-device (~8 GB). */
     const val OFFLINE_MIN_RAM_BYTES = 8L * 1024 * 1024 * 1024
 
-    /** A partial `.litertlm` download smaller than this is treated as invalid. */
-    const val GEMMA_MODEL_MIN_VALID_BYTES = 512L * 1024
+    /** A partial `.litertlm` download smaller than this is treated as invalid (~2.58 GB model). */
+    const val GEMMA_MODEL_MIN_VALID_BYTES = 2L * 1024 * 1024 * 1024
 
     /** Byte length of one on-device audio window at 16 kHz / 16-bit / mono. */
     val OFFLINE_WINDOW_BYTES: Int =

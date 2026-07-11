@@ -41,20 +41,23 @@ class LiteRtGemmaAnalyzer(
             Log.w(TAG, "Model not available; cannot prepare on-device engine")
             return@withContext false
         }
+        val modelPath = modelManager.modelFile.absolutePath
+        val cacheDir = context.cacheDir.path
         try {
-            val config = EngineConfig(
-                modelPath = modelManager.modelFile.absolutePath,
-                backend = Backend.GPU(),
-                audioBackend = Backend.CPU(),
-                cacheDir = context.cacheDir.path,
-            )
-            engine = Engine(config).also { it.initialize() }
-            Log.i(TAG, "On-device Gemma engine initialized")
+            engine = createEngine(modelPath, cacheDir, Backend.GPU()).also { it.initialize() }
+            Log.i(TAG, "On-device Gemma engine initialized with GPU")
             true
-        } catch (error: Exception) {
-            Log.e(TAG, "Failed to initialize on-device engine", error)
-            engine = null
-            false
+        } catch (gpuError: Exception) {
+            Log.w(TAG, "GPU init failed, falling back to CPU", gpuError)
+            try {
+                engine = createEngine(modelPath, cacheDir, Backend.CPU()).also { it.initialize() }
+                Log.i(TAG, "On-device Gemma engine initialized with CPU")
+                true
+            } catch (cpuError: Exception) {
+                Log.e(TAG, "Failed to initialize on-device engine with CPU", cpuError)
+                engine = null
+                false
+            }
         }
     }
 
@@ -91,6 +94,16 @@ class LiteRtGemmaAnalyzer(
             engine = null
         }
     }
+
+    private fun createEngine(modelPath: String, cacheDir: String, backend: Backend): Engine =
+        Engine(
+            EngineConfig(
+                modelPath = modelPath,
+                backend = backend,
+                audioBackend = Backend.CPU(),
+                cacheDir = cacheDir,
+            ),
+        )
 
     private fun extractText(message: Any?): String {
         if (message == null) return ""

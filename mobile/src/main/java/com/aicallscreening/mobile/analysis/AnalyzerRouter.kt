@@ -52,6 +52,7 @@ class AnalyzerRouter(
     private val geminiClient = GeminiLiveClient(onHighRisk = ::handleHighRisk)
 
     private val settings = OfflineFallbackSettings(context)
+    private val routerLock = Any()
     private lateinit var selector: EngineSelector
     private val windowBuffer = AudioWindowBuffer()
     private val onDeviceAnalyzer: ScamAudioAnalyzer =
@@ -101,7 +102,9 @@ class AnalyzerRouter(
 
         when {
             forceOnDevice -> {
-                selector.onCloudError() // move selector to ON_DEVICE
+                synchronized(routerLock) {
+                    selector.onCloudError() // move selector to ON_DEVICE
+                }
                 activateOnDevice("Forced on-device (testing)")
             }
             selector.engine == AnalyzerEngine.CLOUD -> activateCloud()
@@ -110,11 +113,13 @@ class AnalyzerRouter(
     }
 
     fun onAudioChunk(chunk: ByteArray) {
-        when (currentEngine()) {
-            AnalyzerEngine.CLOUD -> geminiClient.sendAudioChunk(chunk)
-            AnalyzerEngine.ON_DEVICE -> {
-                val window = windowBuffer.append(chunk) ?: return
-                analyzeOnDevice(window)
+        synchronized(routerLock) {
+            when (currentEngine()) {
+                AnalyzerEngine.CLOUD -> geminiClient.sendAudioChunk(chunk)
+                AnalyzerEngine.ON_DEVICE -> {
+                    val window = windowBuffer.append(chunk) ?: return
+                    analyzeOnDevice(window)
+                }
             }
         }
     }
@@ -131,7 +136,7 @@ class AnalyzerRouter(
 
                     is GemmaModelManager.DownloadState.Completed -> {
                         _state.update { it.copy(modelStatus = "Model ready") }
-                        if (currentEngine() == AnalyzerEngine.ON_DEVICE) {
+                        if (synchronized(routerLock) { currentEngine() == AnalyzerEngine.ON_DEVICE }) {
                             prepareOnDevice()
                         }
                     }
@@ -152,7 +157,9 @@ class AnalyzerRouter(
         cloudObserverJob = null
         geminiClient.disconnect()
         onDeviceAnalyzer.close()
-        windowBuffer.clear()
+        synchronized(routerLock) {
+            windowBuffer.clear()
+        }
         _state.value = AnalyzerRouterState()
     }
 
@@ -160,8 +167,11 @@ class AnalyzerRouter(
         cloudObserverJob?.cancel()
         cloudObserverJob = scope.launch {
             geminiClient.state.collect { cloudState ->
-                if (currentEngine() != AnalyzerEngine.CLOUD) {
-                    return@collect
+                val shouldFallback = synchronized(routerLock) {
+                    if (currentEngine() != AnalyzerEngine.CLOUD) {
+                        return@collect
+                    }
+                    fallbackEnabled && isCloudFailure(cloudState.status)
                 }
                 _state.update {
                     it.copy(
@@ -171,9 +181,11 @@ class AnalyzerRouter(
                         alertTriggered = cloudState.alertTriggered || it.alertTriggered,
                     )
                 }
-                if (fallbackEnabled && isCloudFailure(cloudState.status)) {
+                if (shouldFallback) {
                     Log.w(TAG, "Cloud engine failed (${cloudState.status}); falling back on-device")
-                    selector.onCloudError()
+                    synchronized(routerLock) {
+                        selector.onCloudError()
+                    }
                     activateOnDevice("Cloud unavailable; using on-device model")
                 }
             }
@@ -182,9 +194,12 @@ class AnalyzerRouter(
 
     private suspend fun onConnectivity(online: Boolean) {
         if (!started || !fallbackEnabled || forceOnDevice) return
-        val previous = currentEngine()
-        val next = selector.onConnectivityChanged(online)
-        if (next == previous) return
+        val next = synchronized(routerLock) {
+            val previous = currentEngine()
+            val engine = selector.onConnectivityChanged(online)
+            if (engine == previous) return
+            engine
+        }
         when (next) {
             AnalyzerEngine.CLOUD -> activateCloud()
             AnalyzerEngine.ON_DEVICE -> activateOnDevice("No internet; using on-device model")
@@ -192,15 +207,19 @@ class AnalyzerRouter(
     }
 
     private fun activateCloud() {
-        _state.update { it.copy(engine = AnalyzerEngine.CLOUD, status = "Connecting") }
-        windowBuffer.clear()
+        synchronized(routerLock) {
+            _state.update { it.copy(engine = AnalyzerEngine.CLOUD, status = "Connecting") }
+            windowBuffer.clear()
+        }
         geminiClient.connect()
     }
 
     private fun activateOnDevice(reason: String) {
         geminiClient.disconnect()
-        windowBuffer.clear()
-        _state.update { it.copy(engine = AnalyzerEngine.ON_DEVICE, status = reason) }
+        synchronized(routerLock) {
+            windowBuffer.clear()
+            _state.update { it.copy(engine = AnalyzerEngine.ON_DEVICE, status = reason) }
+        }
         prepareOnDevice()
     }
 
