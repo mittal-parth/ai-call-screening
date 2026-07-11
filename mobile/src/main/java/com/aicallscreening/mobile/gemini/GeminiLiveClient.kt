@@ -18,37 +18,60 @@ import okhttp3.WebSocketListener
 import okio.ByteString
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicBoolean
+import java.util.concurrent.atomic.AtomicInteger
 
 data class GeminiConnectionState(
     val status: String = "Disconnected",
     val latestVerdict: ScamVerdict? = null,
     val transcript: String? = null,
+    val callTranscript: String = "",
     val alertTriggered: Boolean = false,
 )
 
 class GeminiLiveClient(
     private val onHighRisk: (ScamVerdict) -> Unit,
+    private val onLog: (String) -> Unit = {},
     private val okHttpClient: OkHttpClient = defaultClient(),
 ) {
     private val _state = MutableStateFlow(GeminiConnectionState())
     val state: StateFlow<GeminiConnectionState> = _state.asStateFlow()
 
+    /** Mirrors a message to both Logcat and the optional UI log sink. */
+    private fun emit(msg: String) {
+        Log.i(TAG, msg)
+        onLog(msg)
+    }
+
     private var webSocket: WebSocket? = null
+    // Bumped on every connect(). A superseded socket's late onClosed/onFailure
+    // callbacks carry a stale epoch and must not mutate the current connection's
+    // state — otherwise a reconnect's old "closed" flips status to Disconnected.
+    private val connectionEpoch = AtomicInteger(0)
     private val setupComplete = AtomicBoolean(false)
     private val alertSent = AtomicBoolean(false)
+    private var audioChunksSent = 0L
+    private var audioBytesSent = 0L
+    private val transcriptBuffer = StringBuilder()
+    private val callTranscriptBuffer = StringBuilder()
 
     fun connect() {
         disconnect()
         alertSent.set(false)
         setupComplete.set(false)
+        transcriptBuffer.clear()
+        callTranscriptBuffer.clear()
+        audioChunksSent = 0L
+        audioBytesSent = 0L
         _state.value = GeminiConnectionState(status = "Connecting")
 
         val apiKey = BuildConfig.GEMINI_API_KEY
         if (apiKey.isBlank()) {
             _state.value = GeminiConnectionState(status = "Missing GEMINI_API_KEY")
+            emit("ERROR: GEMINI_API_KEY is blank — set it in local.properties")
             return
         }
 
+        emit("Connecting… key=${apiKey.take(4)}… model=${ScamConfig.GEMINI_LIVE_MODEL}")
         val request = Request.Builder()
             .url(
                 "wss://generativelanguage.googleapis.com/ws/" +
@@ -57,16 +80,32 @@ class GeminiLiveClient(
             )
             .build()
 
-        webSocket = okHttpClient.newWebSocket(request, Listener())
+        val epoch = connectionEpoch.incrementAndGet()
+        webSocket = okHttpClient.newWebSocket(request, Listener(epoch))
     }
 
     fun sendAudioChunk(pcmBytes: ByteArray) {
         val socket = webSocket ?: return
         if (!setupComplete.get()) {
+            Log.d(TAG, "Dropping ${pcmBytes.size}B audio chunk — setup not complete")
             return
         }
         val message = GeminiJson.buildAudioMessage(PcmUtils.bytesToBase64(pcmBytes))
         socket.send(message)
+        audioChunksSent++
+        audioBytesSent += pcmBytes.size
+        // Throttle: one line every ~30 chunks (~3s at 100ms/chunk) to avoid flooding.
+        if (audioChunksSent % 30L == 1L) {
+            emit("→ Gemini audio: chunk #$audioChunksSent, ${pcmBytes.size}B this chunk, $audioBytesSent B total")
+        }
+    }
+
+    /** Signals end-of-turn so the model flushes cached audio and responds. */
+    fun endAudioStream() {
+        val socket = webSocket ?: return
+        if (!setupComplete.get()) return
+        socket.send(GeminiJson.buildAudioStreamEndMessage())
+        emit("→ audioStreamEnd (flush, expect response)")
     }
 
     fun disconnect() {
@@ -76,31 +115,68 @@ class GeminiLiveClient(
         _state.value = _state.value.copy(status = "Disconnected")
     }
 
-    private inner class Listener : WebSocketListener() {
+    private inner class Listener(private val epoch: Int) : WebSocketListener() {
+        /** True only while this listener belongs to the live connection. */
+        private fun isCurrent(): Boolean = epoch == connectionEpoch.get()
+
         override fun onOpen(webSocket: WebSocket, response: Response) {
-            Log.i(TAG, "Gemini WebSocket opened")
+            if (!isCurrent()) return
+            emit("WebSocket opened (HTTP ${response.code}) — sending setup")
             _state.value = _state.value.copy(status = "Connected")
             webSocket.send(GeminiJson.buildSetupMessage())
         }
 
         override fun onMessage(webSocket: WebSocket, text: String) {
+            if (!isCurrent()) return
             if (GeminiJson.isSetupComplete(text)) {
                 setupComplete.set(true)
                 _state.value = _state.value.copy(status = "Ready")
-                Log.i(TAG, "Gemini setup complete")
+                emit("Setup complete ✓ — streaming audio now")
                 return
             }
 
-            val extracted = GeminiJson.extractTextFromServerMessage(text) ?: return
-            _state.value = _state.value.copy(transcript = extracted)
-            val verdict = VerdictParser.parse(extracted)
-            if (verdict != null) {
-                _state.value = _state.value.copy(latestVerdict = verdict, status = "Analyzing")
-                Log.i(TAG, "Verdict: ${verdict.risk} | ${verdict.reason}")
-                if (VerdictParser.isHighRisk(verdict) && alertSent.compareAndSet(false, true)) {
-                    _state.value = _state.value.copy(alertTriggered = true)
-                    onHighRisk(verdict)
+            var handled = false
+
+            // Transcription of the call audio (what's being said on the line).
+            GeminiJson.extractInputTranscription(text)?.let { fragment ->
+                callTranscriptBuffer.append(fragment)
+                if (callTranscriptBuffer.length > MAX_CALL_TRANSCRIPT) {
+                    callTranscriptBuffer.delete(0, callTranscriptBuffer.length - MAX_CALL_TRANSCRIPT)
                 }
+                _state.value = _state.value.copy(callTranscript = callTranscriptBuffer.toString())
+                emit("🗣️ call: $fragment")
+                handled = true
+            }
+
+            // Model's spoken verdict (Gemini's reasoning), streamed incrementally.
+            GeminiJson.extractOutputTranscription(text)?.let { fragment ->
+                transcriptBuffer.append(fragment)
+                emit("🤖 verdict: $fragment")
+                val full = transcriptBuffer.toString()
+                _state.value = _state.value.copy(transcript = full)
+                VerdictParser.parse(full)?.let { verdict ->
+                    _state.value = _state.value.copy(latestVerdict = verdict, status = "Analyzing")
+                    emit("VERDICT: ${verdict.risk} | ${verdict.reason}")
+                    if (VerdictParser.isHighRisk(verdict) && alertSent.compareAndSet(false, true)) {
+                        _state.value = _state.value.copy(alertTriggered = true)
+                        onHighRisk(verdict)
+                    }
+                }
+                handled = true
+            }
+
+            // At verdict-turn boundaries, reset only the verdict buffer (keep the call log).
+            if (text.contains("\"turnComplete\"")) {
+                transcriptBuffer.clear()
+                return
+            }
+
+            if (handled) return
+
+            // Log meaningful control frames only; skip bulky audio blobs and
+            // session-resumption keep-alives (pure noise).
+            if (!text.contains("\"inlineData\"") && !text.contains("\"sessionResumptionUpdate\"")) {
+                emit("RAW ← ${text.take(300)}")
             }
         }
 
@@ -110,11 +186,14 @@ class GeminiLiveClient(
 
         override fun onFailure(webSocket: WebSocket, t: Throwable, response: Response?) {
             Log.e(TAG, "Gemini WebSocket failure", t)
+            if (!isCurrent()) return
+            emit("FAILURE: ${t.message}${response?.let { " (HTTP ${it.code})" } ?: ""}")
             _state.value = _state.value.copy(status = "Error: ${t.message}")
         }
 
         override fun onClosed(webSocket: WebSocket, code: Int, reason: String) {
-            Log.i(TAG, "Gemini WebSocket closed: $code $reason")
+            if (!isCurrent()) return
+            emit("WebSocket closed: $code $reason")
             setupComplete.set(false)
             _state.value = _state.value.copy(status = "Disconnected")
         }
@@ -122,6 +201,7 @@ class GeminiLiveClient(
 
     companion object {
         private const val TAG = "GeminiLiveClient"
+        private const val MAX_CALL_TRANSCRIPT = 4000
 
         fun defaultClient(): OkHttpClient =
             OkHttpClient.Builder()
