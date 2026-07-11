@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">Scam Watch</string>
+    <string name="incoming_call_title">Incoming call</string>
+    <string name="incoming_call_body">Tap to start scam monitoring</string>
+    <string name="scam_alert_title">Likely scam</string>
+    <string name="scam_alert_body">Stop interacting with this caller.</string>
+    <string name="capture_channel_name">Audio capture</string>
+    <string name="capture_notification_title">Monitoring call audio</string>
+    <string name="capture_notification_body">Streaming microphone audio to phone</string>
+</resources>
