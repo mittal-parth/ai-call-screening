@@ -1,6 +1,7 @@
 package com.aicallscreening.wear
 
 import android.Manifest
+import android.content.Intent
 import android.content.pm.PackageManager
 import android.os.Bundle
 import androidx.activity.ComponentActivity
@@ -31,9 +32,7 @@ class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         requestPermissionsIfNeeded()
-        if (intent.getBooleanExtra(CallListenerService.EXTRA_AUTO_START, false)) {
-            startCapture()
-        }
+        maybeAutoStartCapture(intent)
 
         setContent {
             MaterialTheme {
@@ -47,8 +46,23 @@ class MainActivity : ComponentActivity() {
         }
     }
 
+    override fun onNewIntent(intent: Intent) {
+        super.onNewIntent(intent)
+        setIntent(intent)
+        maybeAutoStartCapture(intent)
+    }
+
+    private fun maybeAutoStartCapture(intent: Intent?) {
+        if (intent?.getBooleanExtra(CallListenerService.EXTRA_AUTO_START, false) == true) {
+            startCapture()
+        }
+    }
+
     private fun startCapture() {
-        requestPermissionsIfNeeded()
+        if (!hasRecordAudioPermission()) {
+            requestPermissionsIfNeeded()
+            return
+        }
         AudioCaptureService.start(this)
     }
 
@@ -63,6 +77,10 @@ class MainActivity : ComponentActivity() {
             permissionLauncher.launch(needed.toTypedArray())
         }
     }
+
+    private fun hasRecordAudioPermission(): Boolean =
+        ContextCompat.checkSelfPermission(this, Manifest.permission.RECORD_AUDIO) ==
+            PackageManager.PERMISSION_GRANTED
 }
 
 @Composable

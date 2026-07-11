@@ -19,7 +19,8 @@ class CallListenerService : WearableListenerService() {
     override fun onMessageReceived(messageEvent: MessageEvent) {
         when (messageEvent.path) {
             DataLayerPaths.INCOMING_CALL -> handleIncomingCall()
-            DataLayerPaths.ALERT -> handleScamAlert(String(messageEvent.data))
+            DataLayerPaths.ALERT -> handleScamAlert(String(messageEvent.data, Charsets.UTF_8))
+            DataLayerPaths.STOP_CAPTURE -> handleStopCapture()
             else -> Log.d(TAG, "Ignoring message path: ${messageEvent.path}")
         }
     }
@@ -63,6 +64,11 @@ class CallListenerService : WearableListenerService() {
             .build()
         getSystemService(NotificationManager::class.java)
             .notify(NOTIFICATION_ALERT, notification)
+    }
+
+    private fun handleStopCapture() {
+        Log.i(TAG, "Stop capture message received")
+        AudioCaptureService.stop(this)
     }
 
     private fun vibrateAlert() {

@@ -30,6 +30,7 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.tasks.await
 import java.io.InputStream
 import java.util.concurrent.atomic.AtomicLong
+import java.util.concurrent.atomic.AtomicReference
 
 data class MonitorState(
     val isMonitoring: Boolean = false,
@@ -48,15 +49,19 @@ class MonitorService : Service() {
     private val geminiClient = GeminiLiveClient(onHighRisk = ::handleHighRiskAlert)
     private val bytesReceived = AtomicLong(0)
     private var observeJob: Job? = null
+    private var geminiConnected = false
+    private val audioChannelJob = AtomicReference<Job?>(null)
     private val channelCallback = object : ChannelClient.ChannelCallback() {
         override fun onChannelOpened(channel: ChannelClient.Channel) {
             if (channel.path != DataLayerPaths.AUDIO) {
                 return
             }
             Log.i(TAG, "Audio channel opened from ${channel.nodeId}")
-            serviceScope.launch {
+            audioChannelJob.getAndSet(null)?.cancel()
+            val job = serviceScope.launch {
                 readAudioChannel(channel)
             }
+            audioChannelJob.set(job)
         }
 
         override fun onChannelClosed(
@@ -91,14 +96,19 @@ class MonitorService : Service() {
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         startForeground(NOTIFICATION_ID_MONITOR, buildMonitorNotification())
         _state.update { it.copy(isMonitoring = true, connectionStatus = "Waiting for audio") }
-        geminiClient.connect()
+        if (!geminiConnected) {
+            geminiConnected = true
+            geminiClient.connect()
+        }
         return START_STICKY
     }
 
     override fun onDestroy() {
         channelClient.unregisterChannelCallback(channelCallback)
+        audioChannelJob.getAndSet(null)?.cancel()
         observeJob?.cancel()
         geminiClient.disconnect()
+        geminiConnected = false
         serviceScope.cancel()
         _state.value = MonitorState()
         super.onDestroy()

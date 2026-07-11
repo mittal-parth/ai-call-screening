@@ -113,6 +113,7 @@ adb -s <phone-emulator> emu gsm call +15551234567
 | `/scam/incoming_call` | phone → watch | Prompt user to start monitoring |
 | `/scam/audio` | watch → phone | PCM16 16 kHz mono byte stream |
 | `/scam/alert` | phone → watch | High-risk scam verdict alert |
+| `/scam/stop_capture` | phone → watch | Stop watch audio capture when call ends |
 
 ## Testing
 

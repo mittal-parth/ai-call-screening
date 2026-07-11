@@ -16,7 +16,8 @@ import kotlinx.coroutines.tasks.await
 class CallDetectionManager(
     private val context: Context,
 ) {
-    private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+    private var scopeJob = SupervisorJob()
+    private var scope = CoroutineScope(scopeJob + Dispatchers.IO)
     private val telephonyManager =
         context.getSystemService(TelephonyManager::class.java)
     private val messageClient = Wearable.getMessageClient(context)
@@ -24,11 +25,15 @@ class CallDetectionManager(
 
     private var callback: TelephonyCallback? = null
     private var lastNotifiedState: Int = TelephonyManager.CALL_STATE_IDLE
+    private var autoMonitoringActive = false
 
     fun start() {
         if (callback != null) {
             return
         }
+
+        scopeJob = SupervisorJob()
+        scope = CoroutineScope(scopeJob + Dispatchers.IO)
 
         val listener = object : TelephonyCallback(), TelephonyCallback.CallStateListener {
             override fun onCallStateChanged(state: Int) {
@@ -45,6 +50,7 @@ class CallDetectionManager(
             telephonyManager.unregisterTelephonyCallback(it)
             callback = null
         }
+        scopeJob.cancel()
     }
 
     private fun handleCallState(state: Int) {
@@ -54,17 +60,26 @@ class CallDetectionManager(
         lastNotifiedState = state
 
         when (state) {
-            TelephonyManager.CALL_STATE_RINGING,
-            TelephonyManager.CALL_STATE_OFFHOOK,
-            -> {
-                Log.i(TAG, "Incoming/active call detected: state=$state")
+            TelephonyManager.CALL_STATE_RINGING -> {
+                Log.i(TAG, "Incoming call ringing")
+                autoMonitoringActive = true
                 scope.launch {
                     notifyWatchIncomingCall()
                     MonitorService.start(context)
                 }
             }
+            TelephonyManager.CALL_STATE_OFFHOOK -> {
+                Log.i(TAG, "Call active (offhook)")
+            }
             TelephonyManager.CALL_STATE_IDLE -> {
-                Log.i(TAG, "Call ended")
+                if (autoMonitoringActive) {
+                    Log.i(TAG, "Call ended — stopping auto monitoring")
+                    autoMonitoringActive = false
+                    scope.launch {
+                        notifyWatchStopCapture()
+                    }
+                    MonitorService.stop(context)
+                }
             }
             else -> {
                 Log.w(TAG, "Unhandled call state: $state")
@@ -73,19 +88,23 @@ class CallDetectionManager(
     }
 
     private suspend fun notifyWatchIncomingCall() {
+        sendMessageToWatchNodes(DataLayerPaths.INCOMING_CALL, byteArrayOf())
+    }
+
+    private suspend fun notifyWatchStopCapture() {
+        sendMessageToWatchNodes(DataLayerPaths.STOP_CAPTURE, byteArrayOf())
+    }
+
+    private suspend fun sendMessageToWatchNodes(path: String, payload: ByteArray) {
         val nodes = nodeClient.connectedNodes.await()
         if (nodes.isEmpty()) {
-            Log.w(TAG, "No connected watch nodes for incoming_call message")
+            Log.w(TAG, "No connected watch nodes for $path message")
             return
         }
 
         for (node in nodes) {
-            messageClient.sendMessage(
-                node.id,
-                DataLayerPaths.INCOMING_CALL,
-                byteArrayOf(),
-            ).await()
-            Log.i(TAG, "Sent ${DataLayerPaths.INCOMING_CALL} to ${node.displayName}")
+            messageClient.sendMessage(node.id, path, payload).await()
+            Log.i(TAG, "Sent $path to ${node.displayName}")
         }
     }
 
