@@ -18,7 +18,10 @@ android {
     compileSdk = 35
 
     defaultConfig {
-        applicationId = "com.aicallscreening.mobile"
+        // Must match the wear module's applicationId: the Wear OS Data Layer
+        // routes messages to the app with the same package name on the paired
+        // device. Distinct namespaces keep BuildConfig/R separate per module.
+        applicationId = "com.aicallscreening"
         minSdk = 31
         targetSdk = 35
         versionCode = 1

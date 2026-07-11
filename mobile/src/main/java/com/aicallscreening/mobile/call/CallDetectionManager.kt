@@ -96,15 +96,21 @@ class CallDetectionManager(
     }
 
     private suspend fun sendMessageToWatchNodes(path: String, payload: ByteArray) {
-        val nodes = nodeClient.connectedNodes.await()
-        if (nodes.isEmpty()) {
-            Log.w(TAG, "No connected watch nodes for $path message")
-            return
-        }
+        try {
+            val nodes = nodeClient.connectedNodes.await()
+            if (nodes.isEmpty()) {
+                Log.w(TAG, "No connected watch nodes for $path message")
+                return
+            }
 
-        for (node in nodes) {
-            messageClient.sendMessage(node.id, path, payload).await()
-            Log.i(TAG, "Sent $path to ${node.displayName}")
+            for (node in nodes) {
+                messageClient.sendMessage(node.id, path, payload).await()
+                Log.i(TAG, "Sent $path to ${node.displayName}")
+            }
+        } catch (e: Exception) {
+            // Wearable API may be unavailable (e.g. no paired watch). Degrade
+            // gracefully instead of crashing the app on every incoming call.
+            Log.w(TAG, "Failed to send $path to watch nodes", e)
         }
     }
 
